@@ -1,0 +1,114 @@
+# docker-compose.yml
+# Olive RAG System — full stack
+#
+# Services:
+#   qdrant       — vector store
+#   timescaledb  — time-series relational DB
+#   ollama       — local LLM runtime (DeepSeek-R1)
+#   streamlit    — web dashboard
+#
+# Usage:
+#   docker-compose up -d
+#   docker exec olive-ollama ollama pull deepseek-r1:7b
+
+services:
+
+  # ---------------------------------------------------------------
+  # Qdrant — vector store for RAG document chunks
+  # ---------------------------------------------------------------
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: olive-qdrant
+    ports:
+      - "6333:6333"
+    volumes:
+      - ./qdrant_storage:/qdrant/storage
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------
+  # TimescaleDB — time-series PostgreSQL for production/climate data
+  # ---------------------------------------------------------------
+  timescaledb:
+    image: timescale/timescaledb:latest-pg15
+    container_name: olive-timescaledb
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-louay}
+      POSTGRES_DB: ${POSTGRES_DB:-olive_db}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+    volumes:
+      - ./postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  # ---------------------------------------------------------------
+  # Ollama — local LLM runtime
+  # After first start, pull the model:
+  #   docker exec olive-ollama ollama pull deepseek-r1:7b
+  # ---------------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: olive-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./ollama_models:/root/.ollama
+    restart: unless-stopped
+    # Uncomment if your Azure VM has a GPU:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  # ---------------------------------------------------------------
+  # Streamlit dashboard
+  # ---------------------------------------------------------------
+  streamlit:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: olive-streamlit
+    ports:
+      - "8501:8501"
+    environment:
+      - POSTGRES_HOST=timescaledb
+      - POSTGRES_PORT=5432          # internal Docker port
+      - POSTGRES_DB=${POSTGRES_DB:-olive_db}
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-louay}
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - OLLAMA_HOST=http://ollama:11434
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-deepseek-r1:1.5b}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+      - EMBED_MODEL=${EMBED_MODEL:-BAAI/bge-m3}
+      - EMBED_DEVICE=cuda
+      - RERANK_MODEL=${RERANK_MODEL:-BAAI/bge-reranker-v2-m3}
+      - RERANK_DEVICE=cuda
+    volumes:
+      - ./data:/app/data           # mount data directory for ingestion
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    depends_on:
+      qdrant:
+        condition: service_started
+      timescaledb:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    restart: unless-stopped
+    command: streamlit run ui/app.py --server.port=8501 --server.address=0.0.0.0
